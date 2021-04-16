@@ -1,0 +1,64 @@
+---
+- name: Manage AWS AMI cleanup - Delete old and unused AMIs from AWS account
+  gather_facts: false
+  hosts:
+    - localhost
+  vars:
+    delete_snapshots: 'True'
+    inuse_amis: []
+    older_amis: []
+    ami_filter_age: '30 day' # 30 day, 24 hour
+  pre_tasks:
+    - name: Ensure module dependencies are present
+      pip:
+        name:
+          - boto
+          - boto3
+  tasks:
+    - name: Get the current caller identity information
+      amazon.aws.aws_caller_info:
+      register: caller_info
+
+    - name: List AMIs
+      include_tasks: list-amis.yml
+
+    - name: List EC2 instances in AWS account
+      community.aws.ec2_instance_info:
+        filters:
+          instance-state-name: ["running","pending"]
+      register: list_ec2_instances
+
+    - debug: msg="{{ item.image_id }}"
+      with_items: "{{ list_ec2_instances.instances }}"
+
+    - name: collect AMIs in use by EC2 instances
+      set_fact:
+        inuse_amis: "{{ inuse_amis + [ item.image_id ] }}"
+      with_items: "{{ list_ec2_instances.instances }}"
+
+    - name: collect old AMIs
+      set_fact:
+        older_amis: "{{ older_amis + [ item.image_id ] }}"
+      with_items: "{{ filtered_ami }}"
+
+    - debug: var=inuse_amis
+    - debug: var=older_amis
+
+    - name: Report Delete AMIs older then age and not in use
+      debug:
+        msg: "Skip deletion of AMI {{ item.image_id }} as it is currently in-use or not older then {{ ami_filter_age }}"
+      with_items: "{{ list_amis.images }}"
+      when:
+        - item.image_id in inuse_amis
+        - item.image_id in older_amis
+
+    - name: Delete AMIs older then age and not in use
+      amazon.aws.ec2_ami:
+        image_id: "{{ item.image_id }}"
+        delete_snapshot: "{{ delete_snapshots }}"
+        state: absent
+      with_items: "{{ list_amis.images }}"
+      when:
+        - item.image_id not in inuse_amis
+        - item.image_id in older_amis
+        - item.state != 'pending'
